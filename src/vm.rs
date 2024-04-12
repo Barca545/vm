@@ -14,11 +14,19 @@
 
 //Load file from a path not a preset one
 
-use crate::errors::VMErrors;
+use crate::{errors::VMErrors, helpers::solver};
 use eyre::Result;
-use std::{env::current_dir, fs::read, io::stdin, thread::sleep, time::Duration};
+use serde::{Deserialize, Serialize};
+use std::{
+  collections::VecDeque,
+  env::current_dir,
+  fs::{self, read, File},
+  io::{stdin, stdout, Write},
+  thread::sleep,
+  time::Duration
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum OpCode {
   Halt = 0,
   Set = 1,
@@ -67,77 +75,82 @@ impl OpCode {
       17 => Ok(OpCode::Call),
       18 => Ok(OpCode::Ret),
       19 => Ok(OpCode::Out),
-      // 20 => Ok(OpCode::In),
+      20 => Ok(OpCode::In),
       21 => Ok(OpCode::Noop),
       _ => return Err(VMErrors::UnknownOpcode(value).into())
     }
   }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct VM {
   reg:[u16; 8],
-  ///Stores values in a growable storage as [`u16`]s.
+  ///Memory with 15-bit address space storing 16-bit ([`u16`]) values.
   mem:Vec<u16>,
+  ///Stores values in a growable storage as [`u16`]s.
+  stack:Vec<u16>,
   ///Program counter. Contains the address of the next instruction.
   pc:usize,
   ///Tracks if the [`VM`] should continue to execute instructions or if it
   /// should terminate.
   running:bool,
-  debug:bool
+  ///Stores text inputs
+  inputs:VecDeque<u8>,
+  debug:u8
 }
+
+//Debug Bitflags
+const DEBUG:u8 = 0b10000000;
+const STEP:u8 = 0b01000000;
+const PRINT:u8 = 0b00100000;
 
 impl VM {
   pub fn new() -> Self {
     VM {
       reg:[0; 8],
       mem:Vec::default(),
+      stack:Vec::default(),
       pc:0,
       running:false,
-      debug:false
+      inputs:VecDeque::new(),
+      debug:0
     }
   }
 
-  pub fn load(&mut self) -> Result<()> {
-    //Get the path of the binary.
-    let path = current_dir()?.join("challenge.bin");
-
-    //Load the binary as a Vec<u8> then convert it to a slice of u16s
-    let bin = read(path)?;
-    let bin = unsafe { bin.align_to::<u16>().1 };
-
-    //Add the loaded binary to the stack
-    self.mem.extend_from_slice(bin);
-
-    Ok(())
-  }
-
-  //unsure this should be a method
   pub fn run(&mut self) -> Result<()> {
     self.running = true;
 
     while self.running {
-      self.execute()?;
+      let op = OpCode::from(self.mem[self.pc])?;
+      self.execute(op)?;
     }
 
     Ok(())
   }
 
-  pub fn execute(&mut self) -> Result<()> {
-    let op = OpCode::from(self.mem[self.pc])?;
-    if op == OpCode::Wmem {
-      if self.debug {
-        self.Halt()
+  pub fn dbg_run(&mut self) -> Result<()> {
+    self.running = true;
+    self.debug();
+
+    let mut output = String::new();
+
+    while self.running {
+      let op = OpCode::from(self.mem[self.pc])?;
+      if self.debug & (DEBUG | PRINT) != 0 {
+        self.debug_print(&mut output, op)
       }
-      else {
-        self.debug = true
-      }
+      self.execute(op)?;
     }
 
-    if self.debug {
-      // sleep(Duration::from_millis(3000));
-      dbg!(op);
+    if self.debug & DEBUG > 0 {
+      let mut file = fs::File::create("debug_log.txt").unwrap();
+      file.write_all(output.as_bytes()).unwrap();
     }
 
+    Ok(())
+  }
+
+  pub fn execute(&mut self, op:OpCode) -> Result<()> {
     match op {
       OpCode::Halt => self.Halt(),
       OpCode::Set => self.Set(),
@@ -159,8 +172,7 @@ impl VM {
       OpCode::Call => self.Call(),
       OpCode::Ret => self.Ret()?,
       OpCode::Out => self.Out(),
-      // OpCode::In => self.In(),
-      OpCode::In => unreachable!(),
+      OpCode::In => self.In(),
       OpCode::Noop => self.Noop()
     }
 
@@ -197,6 +209,24 @@ impl VM {
     }
     //Otherwise the argument is equal to the test_argument
     arg
+  }
+
+  fn read_input(&mut self) {
+    let mut s = String::new();
+    stdin().read_line(&mut s).unwrap();
+
+    if '*' == s.chars().nth(0).unwrap() {
+      self.exe_system_commands(s);
+      self.read_input();
+      return;
+    }
+
+    s.retain(|c| c != '\r');
+    self.inputs.extend(s.as_bytes());
+  }
+
+  pub fn push_input(&mut self, s:String) {
+    self.inputs.extend(s.as_bytes());
   }
 }
 
@@ -235,7 +265,7 @@ impl VM {
     a = self.get_register_value(a);
 
     //Push the argument onto the stack
-    self.mem.push(a);
+    self.stack.push(a);
   }
 
   #[allow(non_snake_case)]
@@ -247,7 +277,7 @@ impl VM {
     let a = args[0] % Self::WORDSIZE;
 
     //Get the last element of on the stack
-    let val = self.mem.pop();
+    let val = self.stack.pop();
 
     match val {
       //Write the value removed from the stack into the register indicated by a
@@ -502,7 +532,7 @@ impl VM {
 
     //Push the instruction of the next address to the stack
     let next = self.pc;
-    self.mem.push(next as u16);
+    self.stack.push(next as u16);
 
     //Set the program counter to the address indicated by a
     self.pc = a as usize;
@@ -513,7 +543,7 @@ impl VM {
   /// Panics if the stack is empty.
   pub fn Ret(&mut self) -> Result<()> {
     //Get the last element from the stack
-    let val = self.mem.pop();
+    let val = self.stack.pop();
 
     //Jump to the memory address indicated by the value
     //Halt if the stack is empty
@@ -538,21 +568,23 @@ impl VM {
   }
 
   #[allow(non_snake_case)]
+  ///Takes 1 argument. Reads characters from the [`VM`]'s input field until a
+  /// linebreak is encountered.
   pub fn In(&mut self) {
-    //  read a character from the terminal and write its ascii code to <a>; it
-    // can be assumed that once input starts, it will continue until a newline
-    // is encountered; this means that you can safely read whole lines from the
-    // keyboard instead of having to figure out how to read individual
-    // characters
     let args = self.get_args(1);
-    let mut a = args[0];
+    let a = args[0] % Self::WORDSIZE;
 
-    let mut s = String::new();
-    println!("Input:");
+    //Read the input from memory
+    let s = self.inputs.pop_front();
 
-    stdin().read_line(&mut s).unwrap();
-
-    println!("{s}");
+    match s {
+      Some(s) => self.reg[a as usize] = s as u16,
+      None => {
+        self.read_input();
+        let s = self.inputs.pop_front().unwrap();
+        self.reg[a as usize] = s as u16
+      }
+    }
   }
 
   #[allow(non_snake_case)]
@@ -562,11 +594,123 @@ impl VM {
   }
 }
 
+//System implementations
+impl VM {
+  pub fn exe_system_commands(&mut self, s:String) {
+    let s = &s.as_str()[1..s.len() - 2];
+
+    match s {
+      "s" => self.save(),
+      "q" => self.quit(),
+      "rq" => self.rage_quit(),
+      "fq" => self.force_quit(),
+      "ls" => self.load_save(),
+      "dbg" => self.debug(),
+      "step" => self.step(),
+      "print" => self.step(),
+      "solve" => self.solve(),
+      _ => println!("{}", VMErrors::UnknownCommand(s))
+    }
+  }
+
+  ///Toggle the debug mode. Required for implementing other debug operations.
+  fn debug(&mut self) {
+    self.debug ^= DEBUG;
+  }
+
+  ///Toggle step debug mode.
+  /// Each function call will wait for the user to press enter.
+  fn step(&mut self) {
+    self.debug ^= STEP;
+  }
+
+  ///Toggle print debug mode.
+  /// Each [`OpCode`] called will print to the standard output.
+  fn prt(&mut self) {
+    self.debug ^= PRINT;
+  }
+
+  fn debug_print(&mut self, output:&mut String, s:impl Serialize) {
+    let new_op = serde_json::to_string(&s).unwrap() + ", ";
+    output.extend(new_op.chars())
+  }
+
+  ///Quit the game without saving.
+  fn force_quit(&mut self) {
+    self.Halt()
+  }
+
+  ///Run the coin solver.
+  fn solve(&mut self) {
+    solver(self);
+  }
+
+  ///Quit the current game and start a new one.
+  fn rage_quit(&mut self) {
+    self.Halt();
+    let new = VM::new();
+    *self = new;
+    self.load_new().unwrap();
+    self.run().unwrap();
+  }
+
+  ///Save and quit the game.
+  fn quit(&mut self) {
+    self.save();
+    self.Halt();
+  }
+
+  ///Reload the current save.
+  fn load_save(&mut self) {
+    self.Halt();
+    let new = VM::new();
+    *self = new;
+    self.load().unwrap();
+  }
+
+  fn save(&self) {
+    let mut file = File::create("sync_save.json").unwrap();
+    let state = serde_json::to_string(&self).unwrap();
+    file.write_all(state.as_bytes()).unwrap();
+  }
+
+  pub fn load(&mut self) -> Result<()> {
+    //Try to load from the save
+    let f = fs::read_to_string("sync_save.json");
+
+    match f {
+      Ok(s) => {
+        let state = serde_json::from_str::<VM>(&s)?;
+        let inputs = VecDeque::from([b'\n', b'l', b'o', b'o', b'k', b'\n']);
+
+        self.mem = state.mem;
+        self.stack = state.stack;
+        self.pc = state.pc;
+        self.reg = state.reg;
+        self.inputs = inputs;
+      }
+      Err(_) => self.load_new()?
+    }
+
+    Ok(())
+  }
+
+  fn load_new(&mut self) -> Result<()> {
+    //Load the binary as a Vec<u8> then convert it to a slice of u16s
+    let bin = fs::read("challenge.bin")?;
+    let bin = unsafe { bin.align_to::<u16>().1 };
+
+    //Add the loaded binary to the stack
+    self.mem.extend_from_slice(bin);
+    Ok(())
+  }
+}
+
 #[cfg(test)]
 mod test {
+  use super::{DEBUG, VM};
+  use crate::vm::OpCode;
   use std::io::stdin;
-
-  use super::VM;
 
   #[test]
   fn wmem_is_working() {
@@ -574,8 +718,8 @@ mod test {
     //Should write the value 6 into the 4th address of memory
     let raw = &[0x0010, 0x0003, 0x0006, 0x0000];
     vm.mem.extend_from_slice(raw);
-
-    vm.execute().unwrap();
+    let op = OpCode::from(vm.mem[vm.pc]).unwrap();
+    vm.execute(op).unwrap();
     assert_eq!(vm.mem[3], 6);
 
     let mut vm = VM::new();
@@ -585,7 +729,8 @@ mod test {
     vm.reg[0] = 0x0006;
     vm.mem.extend_from_slice(raw);
 
-    vm.execute().unwrap();
+    let op = OpCode::from(vm.mem[vm.pc]).unwrap();
+    vm.execute(op).unwrap();
 
     assert_eq!(vm.mem[3], 6);
   }
@@ -607,5 +752,15 @@ mod test {
     stdin().read_line(&mut s).unwrap();
 
     println!("{s}");
+  }
+
+  #[test]
+  fn bitflags_work() {
+    let mut vm = VM::new();
+    vm.debug();
+
+    //Confirm running debug means the debug flag is set
+    let t = vm.debug & DEBUG;
+    assert_eq!(t, DEBUG);
   }
 }
