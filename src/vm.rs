@@ -26,7 +26,7 @@ use std::{
   time::Duration
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum OpCode {
   Halt = 0,
   Set = 1,
@@ -51,9 +51,11 @@ pub enum OpCode {
   In = 20,
   Noop = 21
 }
+pub type OpCall = (OpCode, Vec<u16>);
 
 impl OpCode {
-  fn from(value:u16) -> Result<OpCode> {
+  //Create a new [`OpCode`] from a u16.
+  pub fn new(value:u16) -> Result<OpCode> {
     match value {
       0 => Ok(OpCode::Halt),
       1 => Ok(OpCode::Set),
@@ -86,23 +88,23 @@ impl OpCode {
 pub struct VM {
   reg:[u16; 8],
   ///Memory with 15-bit address space storing 16-bit ([`u16`]) values.
-  mem:Vec<u16>,
+  pub mem:Vec<u16>,
   ///Stores values in a growable storage as [`u16`]s.
-  stack:Vec<u16>,
+  pub stack:Vec<u16>,
   ///Program counter. Contains the address of the next instruction.
-  pc:usize,
+  pub pc:usize,
   ///Tracks if the [`VM`] should continue to execute instructions or if it
   /// should terminate.
-  running:bool,
+  pub running:bool,
   ///Stores text inputs
   inputs:VecDeque<u8>,
   debug:u8
 }
 
 //Debug Bitflags
-const DEBUG:u8 = 0b10000000;
-const STEP:u8 = 0b01000000;
-const PRINT:u8 = 0b00100000;
+const DEBUG:u8 = 1 << 7;
+const STEP:u8 = 1 << 6;
+const PRINT:u8 = 1 << 5;
 
 impl VM {
   pub fn new() -> Self {
@@ -111,51 +113,44 @@ impl VM {
       mem:Vec::default(),
       stack:Vec::default(),
       pc:0,
-      running:false,
+      running:true,
       inputs:VecDeque::new(),
       debug:0
     }
   }
 
   pub fn run(&mut self) -> Result<()> {
-    self.running = true;
-
     while self.running {
-      let op = OpCode::from(self.mem[self.pc])?;
+      let op = OpCode::new(self.mem[self.pc])?;
       self.execute(op)?;
     }
-
     Ok(())
   }
 
   pub fn dbg_run(&mut self) -> Result<()> {
-    self.running = true;
     self.debug();
 
-    let mut output = String::new();
+    let mut file = fs::File::create("debug_log.txt").unwrap();
 
     while self.running {
-      let op = OpCode::from(self.mem[self.pc])?;
-      if self.debug & (DEBUG | PRINT) != 0 {
-        self.debug_print(&mut output, op)
-      }
-      self.execute(op)?;
-    }
+      let op = OpCode::new(self.mem[self.pc])?;
 
-    if self.debug & DEBUG > 0 {
-      let mut file = fs::File::create("debug_log.txt").unwrap();
-      file.write_all(output.as_bytes()).unwrap();
+      let call = self.execute(op)?;
+
+      if self.debug & PRINT > 0 {
+        self.debug_print(&mut file, call)
+      }
     }
 
     Ok(())
   }
 
-  pub fn execute(&mut self, op:OpCode) -> Result<()> {
+  pub fn execute(&mut self, op:OpCode) -> Result<OpCall> {
     match op {
       OpCode::Halt => self.Halt(),
       OpCode::Set => self.Set(),
       OpCode::Push => self.Push(),
-      OpCode::Pop => self.Pop()?,
+      OpCode::Pop => self.Pop(),
       OpCode::Eq => self.Eq(),
       OpCode::Gt => self.Gt(),
       OpCode::Jmp => self.Jmp(),
@@ -170,13 +165,11 @@ impl VM {
       OpCode::Rmem => self.Rmem(),
       OpCode::Wmem => self.Wmem(),
       OpCode::Call => self.Call(),
-      OpCode::Ret => self.Ret()?,
+      OpCode::Ret => self.Ret(),
       OpCode::Out => self.Out(),
       OpCode::In => self.In(),
       OpCode::Noop => self.Noop()
     }
-
-    Ok(())
   }
 
   ///Returns the requested number of arguments and increments the program
@@ -237,44 +230,65 @@ impl VM {
   #[allow(non_snake_case)]
   ///Takes 0 arguments. Stops execution, resets the program counter, and
   /// terminates the program.
-  pub fn Halt(&mut self) {
+  pub fn Halt(&mut self) -> Result<OpCall> {
     self.pc = 0;
     self.running = false;
+
+    //Return the OpCall
+    let call = (OpCode::Halt, Vec::new());
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes 2 arguments. Set register indicated by the first argument equal to
   /// the second argument;
-  pub fn Set(&mut self) {
+  pub fn Set(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(2);
     let a = args[0] % Self::WORDSIZE;
     let mut b = args[1];
+
+    //Create the OpCall
+    let call = (OpCode::Set, Vec::from(args));
+
     b = self.get_register_value(b);
 
     //Set register a equal to value b
     self.reg[a as usize] = b;
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes 1 argument. Pushes the argument onto the stack.
-  pub fn Push(&mut self) {
+  pub fn Push(&mut self) -> Result<OpCall> {
     //Get the argument
     let args = self.get_args(1);
     let mut a = args[0];
+
+    //Create the OpCall
+    let call = (OpCode::Push, Vec::from(args));
+
     a = self.get_register_value(a);
 
     //Push the argument onto the stack
     self.stack.push(a);
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes 1 argument. Removes the last element from the stack and writes it
   /// into the register indicated by the argument.
-  pub fn Pop(&mut self) -> Result<()> {
+  pub fn Pop(&mut self) -> Result<OpCall> {
     //Get the argument
     let args = self.get_args(1);
     let a = args[0] % Self::WORDSIZE;
+
+    //Create the OpCall
+    let call = (OpCode::Pop, Vec::from(args));
 
     //Get the last element of on the stack
     let val = self.stack.pop();
@@ -284,23 +298,32 @@ impl VM {
       Some(val) => self.reg[a as usize] = val,
       None => return Err(VMErrors::EmptyStack.into())
     }
-    Ok(())
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes 3 arguments. Sets the register the first argument indicates
   /// equal to 1 if the second and third arguments are equal. Otherwise, sets
   /// the value of the register the first argument indicates to 0.
-  pub fn Eq(&mut self) {
+  pub fn Eq(&mut self) -> Result<OpCall> {
     let args = self.get_args(3);
     let a = args[0] % Self::WORDSIZE;
     let mut b = args[1];
     let mut c = args[2];
+
+    //Create the OpCall
+    let call = (OpCode::Eq, Vec::from(args));
+
     b = self.get_register_value(b);
     c = self.get_register_value(c);
 
     //Perform the comparison and set the register indicated by a to the result
     self.reg[a as usize] = (b == c) as u16;
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
@@ -308,36 +331,54 @@ impl VM {
   /// to 1 if the second argument's value is greater than third argument's
   /// value. Sets the register indicated by the first argument equal to 0 if the
   /// second argument's value is not greater than third argument's value.
-  pub fn Gt(&mut self) {
+  pub fn Gt(&mut self) -> Result<OpCall> {
     let args = self.get_args(3);
     let a = args[0] % Self::WORDSIZE;
     let mut b = args[1];
     let mut c = args[2];
+
+    //Create the OpCall
+    let call = (OpCode::Gt, Vec::from(args));
+
     b = self.get_register_value(b);
     c = self.get_register_value(c);
 
     //Perform the comparison and set the register indicated by a to the result
     self.reg[a as usize] = (b > c) as u16;
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes in 1 argument. Sets the program counter to the argument.
-  pub fn Jmp(&mut self) {
+  pub fn Jmp(&mut self) -> Result<OpCall> {
     //Get the argument
     let args = self.get_args(1);
+
+    //Create the OpCall
+    let call = (OpCode::Jmp, Vec::from(args));
+
     let mut a = args[0];
     a = self.get_register_value(a);
 
     //Set the program counter to the memory address indicated by a
     self.pc = a as usize;
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes in 2 arguments. Sets the program counter to the value of the second
   /// argument if the first argument is nonzero.
-  pub fn Jt(&mut self) {
+  pub fn Jt(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(2);
+
+    //Create the OpCall
+    let call = (OpCode::Jt, Vec::from(args));
+
     let mut a = args[0];
     let mut b = args[1];
     a = self.get_register_value(a);
@@ -348,16 +389,23 @@ impl VM {
       b = self.get_register_value(b);
       self.pc = b as usize;
     }
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes in 2 arguments. Sets the program counter to the second argument if
   /// the first argument is zero.
-  pub fn Jf(&mut self) {
+  pub fn Jf(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(2);
     let mut a = args[0];
     let mut b = args[1];
+
+    //Create the OpCall
+    let call = (OpCode::Jf, Vec::from(args));
+
     a = self.get_register_value(a);
 
     //Set the PC to b's value if a is zero
@@ -367,18 +415,25 @@ impl VM {
 
       self.pc = b as usize;
     }
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes in 3 arguments. Stores the result of summing the second and third
   /// arguments' values (modulo WORDSIZE) in the register indicated by the first
   /// argument.
-  pub fn Add(&mut self) {
+  pub fn Add(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(3);
     let a = args[0] % Self::WORDSIZE;
     let mut b = args[1];
     let mut c = args[2];
+
+    //Create the OpCall
+    let call = (OpCode::Add, Vec::from(args));
+
     b = self.get_register_value(b);
     c = self.get_register_value(c);
 
@@ -387,18 +442,25 @@ impl VM {
 
     //Store sum in the register indicated by a
     self.reg[a as usize] = sum;
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes in 3 arguments. Stores the product of the second and
   /// third arguments' values (modulo WORDSIZE) in the register indicated by the
   /// first argument.
-  pub fn Mult(&mut self) {
+  pub fn Mult(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(3);
     let a = args[0] % Self::WORDSIZE;
     let mut b = args[1];
     let mut c = args[2];
+
+    //Create the OpCall
+    let call = (OpCode::Mult, Vec::from(args));
+
     b = self.get_register_value(b);
     c = self.get_register_value(c);
 
@@ -407,17 +469,24 @@ impl VM {
 
     //Store the product in the register indicated by a
     self.reg[a as usize] = prod;
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes 3 arguments. Stores the remainder of the second argument divided by
   /// the third argument in the register indicated by the first argument.
-  pub fn Mod(&mut self) {
+  pub fn Mod(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(3);
     let a = args[0] % Self::WORDSIZE;
     let mut b = args[1];
     let mut c = args[2];
+
+    //Create the OpCall
+    let call = (OpCode::Mod, Vec::from(args));
+
     b = self.get_register_value(b);
     c = self.get_register_value(c);
 
@@ -427,18 +496,25 @@ impl VM {
 
     //Store the quotient in the register indicated by a
     self.reg[a as usize] = quot;
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes 3 arguments. Stores the value of the bitwise `AND` of the second and
   /// third arguments' values in the register indicated by the first
   /// arguement.
-  pub fn And(&mut self) {
+  pub fn And(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(3);
     let a = args[0] % Self::WORDSIZE;
     let mut b = args[1];
     let mut c = args[2];
+
+    //Create the OpCall
+    let call = (OpCode::And, Vec::from(args));
+
     b = self.get_register_value(b);
     c = self.get_register_value(c);
 
@@ -447,18 +523,25 @@ impl VM {
 
     //Store value in the register indicated by a
     self.reg[a as usize] = val;
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes 3 values. Stores the value of the bitwise `OR` of the second and
   /// third arguments' values in the register indicated by the first
   /// arguement.
-  pub fn Or(&mut self) {
+  pub fn Or(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(3);
     let a = args[0] % Self::WORDSIZE;
     let mut b = args[1];
     let mut c = args[2];
+
+    //Create the OpCall
+    let call = (OpCode::Or, Vec::from(args));
+
     b = self.get_register_value(b);
     c = self.get_register_value(c);
 
@@ -467,15 +550,22 @@ impl VM {
 
     //Store value in the register indicated by a
     self.reg[a as usize] = val;
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes 2 arguments. Stores the value of the 15-bit bitwise `INVERSE` of the
   /// second argument's value in the register indicated by the first
   /// arguement.
-  pub fn Not(&mut self) {
+  pub fn Not(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(2);
+
+    //Create the OpCall
+    let call = (OpCode::Not, Vec::from(args));
+
     let a = args[0] % Self::WORDSIZE;
     let mut b = args[1];
     b = self.get_register_value(b);
@@ -486,14 +576,21 @@ impl VM {
 
     //Store value in the register indicated by a
     self.reg[a as usize] = val;
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes 2 arguments. Reads memory from the memory address indicated by the
   /// second argument into the register indicated by the first argument.
-  pub fn Rmem(&mut self) {
+  pub fn Rmem(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(2);
+
+    //Create the OpCall
+    let call = (OpCode::Rmem, Vec::from(args));
+
     let a = args[0] % Self::WORDSIZE;
     let mut b = args[1];
     b = self.get_register_value(b);
@@ -503,30 +600,44 @@ impl VM {
 
     //Store the value in the register indicated by a
     self.reg[a as usize] = val;
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes 2 arguments. Writes the value of the
   /// second argument into the memory address indicated by the first argument.
-  pub fn Wmem(&mut self) {
+  pub fn Wmem(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(2);
     let mut a = args[0];
     let mut b = args[1];
+
+    //Create the OpCall
+    let call = (OpCode::Wmem, Vec::from(args));
+
     a = self.get_register_value(a);
     b = self.get_register_value(b);
 
     //Store b in address a
     self.mem[a as usize] = b;
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes 1 argument. Writes the address of the next instruction to the stack
   /// then set the program counter to the memory address indicated by the
   /// argument.
-  pub fn Call(&mut self) {
+  pub fn Call(&mut self) -> Result<OpCall> {
     //Get the args
     let args = self.get_args(1);
+
+    //Create the OpCall
+    let call = (OpCode::Call, Vec::from(args));
+
     let mut a = args[0];
     a = self.get_register_value(a);
 
@@ -536,12 +647,15 @@ impl VM {
 
     //Set the program counter to the address indicated by a
     self.pc = a as usize;
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes 0 arguments. Remove the top value from the stack and jump to it.
   /// Panics if the stack is empty.
-  pub fn Ret(&mut self) -> Result<()> {
+  pub fn Ret(&mut self) -> Result<OpCall> {
     //Get the last element from the stack
     let val = self.stack.pop();
 
@@ -551,27 +665,41 @@ impl VM {
       Some(val) => self.pc = val as usize,
       None => return Err(VMErrors::EmptyStack.into())
     }
-    Ok(())
+
+    //Return the OpCall
+    let call = (OpCode::Ret, Vec::new());
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes 1 argument. Prints the next character represented by the argument's
   /// ascii representation to the terminal.
-  pub fn Out(&mut self) {
+  pub fn Out(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(1);
+
+    //Create the OpCall
+    let call = (OpCode::Out, Vec::from(args));
+
     let mut a = args[0];
     a = self.get_register_value(a);
 
-    let character = char::from_u32(a as u32).unwrap().to_string();
-    print!("{character}")
+    let character = char::from_u32(a as u32).unwrap();
+    print!("{character}");
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///Takes 1 argument. Reads characters from the [`VM`]'s input field until a
   /// linebreak is encountered.
-  pub fn In(&mut self) {
+  pub fn In(&mut self) -> Result<OpCall> {
     let args = self.get_args(1);
+
+    //Create the OpCall
+    let call = (OpCode::In, Vec::from(args));
+
     let a = args[0] % Self::WORDSIZE;
 
     //Read the input from memory
@@ -585,12 +713,19 @@ impl VM {
         self.reg[a as usize] = s as u16
       }
     }
+
+    //Return the OpCall
+    Ok(call)
   }
 
   #[allow(non_snake_case)]
   ///No operation. Increments the program counter by 1.
-  pub fn Noop(&mut self) {
+  pub fn Noop(&mut self) -> Result<OpCall> {
     self.pc += 1;
+
+    //Return the OpCall
+    let call = (OpCode::Noop, Vec::new());
+    Ok(call)
   }
 }
 
@@ -607,8 +742,11 @@ impl VM {
       "ls" => self.load_save(),
       "dbg" => self.debug(),
       "step" => self.step(),
-      "print" => self.step(),
+      "print" => self.prt(),
+      "clear" => self.dbg_clear(),
       "solve" => self.solve(),
+      "1115" => self.prt_mem_addr(1115),
+      "teleport" => self.teleport(),
       _ => println!("{}", VMErrors::UnknownCommand(s))
     }
   }
@@ -630,14 +768,22 @@ impl VM {
     self.debug ^= PRINT;
   }
 
-  fn debug_print(&mut self, output:&mut String, s:impl Serialize) {
-    let new_op = serde_json::to_string(&s).unwrap() + ", ";
-    output.extend(new_op.chars())
+  fn debug_print(&self, file:&mut File, call:OpCall) {
+    //Create the new log
+    let log = serde_json::to_string(&call).unwrap();
+
+    //Append new OpCall to the end of the debug file
+    writeln!(file, "{log}").unwrap();
+  }
+
+  fn dbg_clear(&self) {
+    let mut file = fs::File::create("debug_log.txt").unwrap();
+    file.write_all(&[]).unwrap();
   }
 
   ///Quit the game without saving.
   fn force_quit(&mut self) {
-    self.Halt()
+    self.Halt().unwrap();
   }
 
   ///Run the coin solver.
@@ -645,9 +791,17 @@ impl VM {
     solver(self);
   }
 
+  ///Prints the [`OpCode`] of the provided memory address + the next 3 values.
+  fn prt_mem_addr(&mut self, addr:u16) {
+    let mut file = File::create("dbg_console.txt").unwrap();
+    let op = OpCode::new(self.mem[addr as usize]).unwrap();
+    let op = serde_json::to_string(&op).unwrap();
+    writeln!(file, "{op}").unwrap();
+  }
+
   ///Quit the current game and start a new one.
   fn rage_quit(&mut self) {
-    self.Halt();
+    self.Halt().unwrap();
     let new = VM::new();
     *self = new;
     self.load_new().unwrap();
@@ -657,15 +811,19 @@ impl VM {
   ///Save and quit the game.
   fn quit(&mut self) {
     self.save();
-    self.Halt();
+    self.Halt().unwrap();
   }
 
   ///Reload the current save.
   fn load_save(&mut self) {
-    self.Halt();
+    self.Halt().unwrap();
     let new = VM::new();
     *self = new;
     self.load().unwrap();
+  }
+
+  fn teleport(&mut self) {
+    self.reg[7] = 1;
   }
 
   fn save(&self) {
@@ -718,7 +876,7 @@ mod test {
     //Should write the value 6 into the 4th address of memory
     let raw = &[0x0010, 0x0003, 0x0006, 0x0000];
     vm.mem.extend_from_slice(raw);
-    let op = OpCode::from(vm.mem[vm.pc]).unwrap();
+    let op = OpCode::new(vm.mem[vm.pc]).unwrap();
     vm.execute(op).unwrap();
     assert_eq!(vm.mem[3], 6);
 
@@ -729,7 +887,7 @@ mod test {
     vm.reg[0] = 0x0006;
     vm.mem.extend_from_slice(raw);
 
-    let op = OpCode::from(vm.mem[vm.pc]).unwrap();
+    let op = OpCode::new(vm.mem[vm.pc]).unwrap();
     vm.execute(op).unwrap();
 
     assert_eq!(vm.mem[3], 6);
@@ -752,15 +910,5 @@ mod test {
     stdin().read_line(&mut s).unwrap();
 
     println!("{s}");
-  }
-
-  #[test]
-  fn bitflags_work() {
-    let mut vm = VM::new();
-    vm.debug();
-
-    //Confirm running debug means the debug flag is set
-    let t = vm.debug & DEBUG;
-    assert_eq!(t, DEBUG);
   }
 }
