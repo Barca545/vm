@@ -51,10 +51,69 @@ pub enum OpCode {
   In = 20,
   Noop = 21
 }
-pub type OpCall = (OpCode, Vec<u16>);
+pub struct OpCall {
+  code:OpCode,
+  pc:usize,
+  args:Vec<u16>,
+  reg:[u16; 8],
+  stack_size:usize,
+  stack:Vec<u16>
+}
+
+impl OpCall {
+  ///Create a new [`OpCall`].
+  pub fn new(code:OpCode, pc:usize, args:Vec<u16>, reg:[u16; 8], stack_size:usize, stack:Vec<u16>) -> Self {
+    OpCall {
+      code,
+      pc,
+      args,
+      reg,
+      stack_size,
+      stack
+    }
+  }
+
+  ///Convert an [`OpCall`] into its [`String`] representation.
+  pub fn to_string(&self) -> String {
+    let code = serde_json::to_string(&self.code).unwrap();
+    let args = format!("{:?}", self.args);
+    let reg = format!(
+      "R0:{:#?},R1:{:#?},R2:{:#?},R3:{:#?},R4:{:#?},R5:{:#?},R6:{:#?},R7:{:#?}",
+      self.reg[0], self.reg[1], self.reg[2], self.reg[3], self.reg[4], self.reg[5], self.reg[6], self.reg[7]
+    );
+    let stack_size = format!("Len: {}", self.stack_size);
+
+    let stack;
+    if self.stack.len() == 0 {
+      stack = format!("Stack Contents: {}", "Empty");
+    }
+    else if self.stack.len() > 15 {
+      let mut items = String::new();
+      for i in &self.stack[self.stack.len() - 16..] {
+        items += &i.to_string();
+        items += ", ";
+      }
+      stack = format!("Stack Contents(Abbreviated): {items}");
+    }
+    else {
+      let mut items = String::new();
+      for i in &self.stack {
+        items += &i.to_string();
+        items += ", ";
+      }
+      stack = format!("Stack Contents: {items}");
+    }
+
+    let call = format!(
+      "Code: {}",
+      code + "\n\t" + "Pc: " + &self.pc.to_string() + "\n\t" + "Args: " + &args + "\n\t" + "Regs: " + &reg + "\n\t" + &stack_size + "\n\t" + &stack + "\n"
+    );
+    String::from(call)
+  }
+}
 
 impl OpCode {
-  //Create a new [`OpCode`] from a u16.
+  ///Create a new [`OpCode`] from a u16.
   pub fn new(value:u16) -> Result<OpCode> {
     match value {
       0 => Ok(OpCode::Halt),
@@ -86,7 +145,7 @@ impl OpCode {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VM {
-  reg:[u16; 8],
+  pub reg:[u16; 8],
   ///Memory with 15-bit address space storing 16-bit ([`u16`]) values.
   pub mem:Vec<u16>,
   ///Stores values in a growable storage as [`u16`]s.
@@ -174,12 +233,12 @@ impl VM {
 
   ///Returns the requested number of arguments and increments the program
   /// counter by the requested number of arguments.
-  pub fn get_args(&mut self, num:usize) -> &[u16] {
+  pub fn get_args(&mut self, num:usize) -> Vec<u16> {
     //Increment the program counter to the first argument
     self.pc += 1;
 
     //Get the arguments
-    let args = &self.mem[self.pc..self.pc + num];
+    let args = Vec::from(&self.mem[self.pc..self.pc + num]);
 
     //Update the PC
     self.pc += num;
@@ -221,6 +280,17 @@ impl VM {
   pub fn push_input(&mut self, s:String) {
     self.inputs.extend(s.as_bytes());
   }
+
+  ///Convert an [`OpCode`] into an [`OpCall`].
+  fn new_opcall(&self, op:OpCode, args:&Vec<u16>) -> OpCall {
+    //Get the PC of the OpCode called
+    let pc = self.pc - (args.len() + 1);
+
+    //Get the last item on the stack or mark it as -1 for Empty
+    let stack = self.stack.clone();
+
+    OpCall::new(op, pc, args.clone(), self.reg, self.stack.len(), stack)
+  }
 }
 
 //Opcode implementations
@@ -235,7 +305,7 @@ impl VM {
     self.running = false;
 
     //Return the OpCall
-    let call = (OpCode::Halt, Vec::new());
+    let call = self.new_opcall(OpCode::Halt, &Vec::new());
     Ok(call)
   }
 
@@ -248,15 +318,13 @@ impl VM {
     let a = args[0] % Self::WORDSIZE;
     let mut b = args[1];
 
-    //Create the OpCall
-    let call = (OpCode::Set, Vec::from(args));
-
     b = self.get_register_value(b);
 
     //Set register a equal to value b
     self.reg[a as usize] = b;
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Set, &args);
     Ok(call)
   }
 
@@ -267,15 +335,13 @@ impl VM {
     let args = self.get_args(1);
     let mut a = args[0];
 
-    //Create the OpCall
-    let call = (OpCode::Push, Vec::from(args));
-
     a = self.get_register_value(a);
 
     //Push the argument onto the stack
     self.stack.push(a);
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Push, &args);
     Ok(call)
   }
 
@@ -287,9 +353,6 @@ impl VM {
     let args = self.get_args(1);
     let a = args[0] % Self::WORDSIZE;
 
-    //Create the OpCall
-    let call = (OpCode::Pop, Vec::from(args));
-
     //Get the last element of on the stack
     let val = self.stack.pop();
 
@@ -299,7 +362,8 @@ impl VM {
       None => return Err(VMErrors::EmptyStack.into())
     }
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = { self.new_opcall(OpCode::Pop, &args) };
     Ok(call)
   }
 
@@ -313,16 +377,14 @@ impl VM {
     let mut b = args[1];
     let mut c = args[2];
 
-    //Create the OpCall
-    let call = (OpCode::Eq, Vec::from(args));
-
     b = self.get_register_value(b);
     c = self.get_register_value(c);
 
     //Perform the comparison and set the register indicated by a to the result
     self.reg[a as usize] = (b == c) as u16;
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Eq, &args);
     Ok(call)
   }
 
@@ -337,16 +399,14 @@ impl VM {
     let mut b = args[1];
     let mut c = args[2];
 
-    //Create the OpCall
-    let call = (OpCode::Gt, Vec::from(args));
-
     b = self.get_register_value(b);
     c = self.get_register_value(c);
 
     //Perform the comparison and set the register indicated by a to the result
     self.reg[a as usize] = (b > c) as u16;
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Gt, &args);
     Ok(call)
   }
 
@@ -356,16 +416,14 @@ impl VM {
     //Get the argument
     let args = self.get_args(1);
 
-    //Create the OpCall
-    let call = (OpCode::Jmp, Vec::from(args));
-
     let mut a = args[0];
     a = self.get_register_value(a);
 
     //Set the program counter to the memory address indicated by a
     self.pc = a as usize;
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Jmp, &args);
     Ok(call)
   }
 
@@ -375,9 +433,6 @@ impl VM {
   pub fn Jt(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(2);
-
-    //Create the OpCall
-    let call = (OpCode::Jt, Vec::from(args));
 
     let mut a = args[0];
     let mut b = args[1];
@@ -390,7 +445,8 @@ impl VM {
       self.pc = b as usize;
     }
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Jt, &args);
     Ok(call)
   }
 
@@ -403,9 +459,6 @@ impl VM {
     let mut a = args[0];
     let mut b = args[1];
 
-    //Create the OpCall
-    let call = (OpCode::Jf, Vec::from(args));
-
     a = self.get_register_value(a);
 
     //Set the PC to b's value if a is zero
@@ -416,7 +469,8 @@ impl VM {
       self.pc = b as usize;
     }
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Jf, &args);
     Ok(call)
   }
 
@@ -431,9 +485,6 @@ impl VM {
     let mut b = args[1];
     let mut c = args[2];
 
-    //Create the OpCall
-    let call = (OpCode::Add, Vec::from(args));
-
     b = self.get_register_value(b);
     c = self.get_register_value(c);
 
@@ -443,7 +494,8 @@ impl VM {
     //Store sum in the register indicated by a
     self.reg[a as usize] = sum;
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Add, &args);
     Ok(call)
   }
 
@@ -458,9 +510,6 @@ impl VM {
     let mut b = args[1];
     let mut c = args[2];
 
-    //Create the OpCall
-    let call = (OpCode::Mult, Vec::from(args));
-
     b = self.get_register_value(b);
     c = self.get_register_value(c);
 
@@ -470,7 +519,8 @@ impl VM {
     //Store the product in the register indicated by a
     self.reg[a as usize] = prod;
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Mult, &args);
     Ok(call)
   }
 
@@ -484,9 +534,6 @@ impl VM {
     let mut b = args[1];
     let mut c = args[2];
 
-    //Create the OpCall
-    let call = (OpCode::Mod, Vec::from(args));
-
     b = self.get_register_value(b);
     c = self.get_register_value(c);
 
@@ -497,7 +544,8 @@ impl VM {
     //Store the quotient in the register indicated by a
     self.reg[a as usize] = quot;
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Mod, &args);
     Ok(call)
   }
 
@@ -512,9 +560,6 @@ impl VM {
     let mut b = args[1];
     let mut c = args[2];
 
-    //Create the OpCall
-    let call = (OpCode::And, Vec::from(args));
-
     b = self.get_register_value(b);
     c = self.get_register_value(c);
 
@@ -524,7 +569,8 @@ impl VM {
     //Store value in the register indicated by a
     self.reg[a as usize] = val;
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::And, &args);
     Ok(call)
   }
 
@@ -539,9 +585,6 @@ impl VM {
     let mut b = args[1];
     let mut c = args[2];
 
-    //Create the OpCall
-    let call = (OpCode::Or, Vec::from(args));
-
     b = self.get_register_value(b);
     c = self.get_register_value(c);
 
@@ -551,7 +594,8 @@ impl VM {
     //Store value in the register indicated by a
     self.reg[a as usize] = val;
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Or, &args);
     Ok(call)
   }
 
@@ -562,9 +606,6 @@ impl VM {
   pub fn Not(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(2);
-
-    //Create the OpCall
-    let call = (OpCode::Not, Vec::from(args));
 
     let a = args[0] % Self::WORDSIZE;
     let mut b = args[1];
@@ -577,7 +618,8 @@ impl VM {
     //Store value in the register indicated by a
     self.reg[a as usize] = val;
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Not, &args);
     Ok(call)
   }
 
@@ -587,9 +629,6 @@ impl VM {
   pub fn Rmem(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(2);
-
-    //Create the OpCall
-    let call = (OpCode::Rmem, Vec::from(args));
 
     let a = args[0] % Self::WORDSIZE;
     let mut b = args[1];
@@ -601,7 +640,8 @@ impl VM {
     //Store the value in the register indicated by a
     self.reg[a as usize] = val;
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Rmem, &args);
     Ok(call)
   }
 
@@ -614,16 +654,14 @@ impl VM {
     let mut a = args[0];
     let mut b = args[1];
 
-    //Create the OpCall
-    let call = (OpCode::Wmem, Vec::from(args));
-
     a = self.get_register_value(a);
     b = self.get_register_value(b);
 
     //Store b in address a
     self.mem[a as usize] = b;
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Wmem, &args);
     Ok(call)
   }
 
@@ -635,9 +673,6 @@ impl VM {
     //Get the args
     let args = self.get_args(1);
 
-    //Create the OpCall
-    let call = (OpCode::Call, Vec::from(args));
-
     let mut a = args[0];
     a = self.get_register_value(a);
 
@@ -648,7 +683,8 @@ impl VM {
     //Set the program counter to the address indicated by a
     self.pc = a as usize;
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Call, &args);
     Ok(call)
   }
 
@@ -666,8 +702,8 @@ impl VM {
       None => return Err(VMErrors::EmptyStack.into())
     }
 
-    //Return the OpCall
-    let call = (OpCode::Ret, Vec::new());
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Ret, &Vec::new());
     Ok(call)
   }
 
@@ -676,10 +712,7 @@ impl VM {
   /// ascii representation to the terminal.
   pub fn Out(&mut self) -> Result<OpCall> {
     //Get the arguments
-    let args = self.get_args(1);
-
-    //Create the OpCall
-    let call = (OpCode::Out, Vec::from(args));
+    let args = self.get_args(1).clone();
 
     let mut a = args[0];
     a = self.get_register_value(a);
@@ -687,7 +720,8 @@ impl VM {
     let character = char::from_u32(a as u32).unwrap();
     print!("{character}");
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Out, &args);
     Ok(call)
   }
 
@@ -696,9 +730,6 @@ impl VM {
   /// linebreak is encountered.
   pub fn In(&mut self) -> Result<OpCall> {
     let args = self.get_args(1);
-
-    //Create the OpCall
-    let call = (OpCode::In, Vec::from(args));
 
     let a = args[0] % Self::WORDSIZE;
 
@@ -714,7 +745,8 @@ impl VM {
       }
     }
 
-    //Return the OpCall
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::In, &args);
     Ok(call)
   }
 
@@ -723,8 +755,8 @@ impl VM {
   pub fn Noop(&mut self) -> Result<OpCall> {
     self.pc += 1;
 
-    //Return the OpCall
-    let call = (OpCode::Noop, Vec::new());
+    //Create and return the OpCall
+    let call = self.new_opcall(OpCode::Noop, &Vec::new());
     Ok(call)
   }
 }
@@ -746,7 +778,14 @@ impl VM {
       "clear" => self.dbg_clear(),
       "solve" => self.solve(),
       "1115" => self.prt_mem_addr(1115),
-      "teleport" => self.teleport(),
+      "teleport" => self.teleport(17),
+      // "teleport" => {
+      //   self.reg[7] = 6;
+      //   // self.reg[0] = 6;
+      //   // self.reg[1] = 6;
+      //   // self.pc = 5531;
+      //   // self.run().unwrap();
+      // }
       _ => println!("{}", VMErrors::UnknownCommand(s))
     }
   }
@@ -770,10 +809,10 @@ impl VM {
 
   fn debug_print(&self, file:&mut File, call:OpCall) {
     //Create the new log
-    let log = serde_json::to_string(&call).unwrap();
+    let log = call.to_string();
 
     //Append new OpCall to the end of the debug file
-    writeln!(file, "{log}").unwrap();
+    write!(file, "{log}").unwrap();
   }
 
   fn dbg_clear(&self) {
@@ -796,7 +835,7 @@ impl VM {
     let mut file = File::create("dbg_console.txt").unwrap();
     let op = OpCode::new(self.mem[addr as usize]).unwrap();
     let op = serde_json::to_string(&op).unwrap();
-    writeln!(file, "{op}").unwrap();
+    write!(file, "{op}").unwrap();
   }
 
   ///Quit the current game and start a new one.
@@ -822,9 +861,59 @@ impl VM {
     self.load().unwrap();
   }
 
-  fn teleport(&mut self) {
-    self.reg[7] = 1;
+  fn teleport(&mut self, r7:u16) {
+    self.reg[7] = r7;
+    // self.teleport_inner();
   }
+
+  // fn teleport_inner(&mut self) {
+  //   if self.reg[0] != 0 {
+  //     //Total loops: R1 * R0 - 1
+  //     if self.reg[1] != 0 {
+  //       self.reg[0] -= 1;
+  //       self.teleport_inner();
+  //       self.reg[1] -= 1;
+  //       self.teleport_inner();
+  //     }
+  //     //Total loops: R7 * R0
+  //     else {
+  //       self.reg[0] -= 1;
+  //       self.reg[1] = self.reg[7];
+  //       self.teleport_inner();
+  //     }
+  //   }
+  //   self.reg[1] += 1;
+  //   dbg!(self.reg[1]);
+  // }
+
+  // fn teleport_inner(&mut self, r0:u16, r1:u16, r7:u16) -> u16 {
+  //   if r0 != 0 {
+  //     //Total loops: R1 * R0 - 1
+  //     if self.reg[1] != 0 {
+  //       // self.stack.push(self.reg[0]);
+  //       r0 -= 1;
+  //       self.teleport_inner();
+  //       r1 -= 1;
+  //       self.teleport_inner()
+  //     }
+  //     //Total loops: R7 * R0
+  //     else if r1 == 0 {
+  //       r0 -= 1;
+  //       r1 = r7;
+  //       self.teleport_inner()
+  //     }
+  //   }
+  //   //AS FAR AS I CAN TELL THE BELOW CAUSE AN INFINITE LOOP
+  //   //Total loops: R1 + 1
+  //   else if r0 == 0 {
+  //     // self.reg[0] = self.reg[1] + 1;
+  //     // self.reg[1] = self.reg[0];
+  //     // self.reg[0] = self.stack.pop().unwrap();
+  //     // self.reg[0] -= 1;
+  //     r1 += 1;
+  //     self.teleport_inner()
+  //   }
+  // }
 
   fn save(&self) {
     let mut file = File::create("sync_save.json").unwrap();
@@ -866,9 +955,9 @@ impl VM {
 
 #[cfg(test)]
 mod test {
-  use super::{DEBUG, VM};
-  use crate::vm::OpCode;
-  use std::io::stdin;
+  use super::VM;
+  use crate::vm::{OpCall, OpCode};
+  use std::{fmt::Write, fs::File, io::stdin};
 
   #[test]
   fn wmem_is_working() {
@@ -877,7 +966,13 @@ mod test {
     let raw = &[0x0010, 0x0003, 0x0006, 0x0000];
     vm.mem.extend_from_slice(raw);
     let op = OpCode::new(vm.mem[vm.pc]).unwrap();
-    vm.execute(op).unwrap();
+    let call = vm.execute(op).unwrap();
+
+    //Test how OpCall prints
+    let mut f = File::create("debug_log.txt").unwrap();
+    print!("{}", call.to_string());
+    vm.debug_print(&mut f, call);
+
     assert_eq!(vm.mem[3], 6);
 
     let mut vm = VM::new();
@@ -910,5 +1005,40 @@ mod test {
     stdin().read_line(&mut s).unwrap();
 
     println!("{s}");
+  }
+
+  #[test]
+  fn find_line() {
+    let mut vm = VM::new();
+    vm.load().unwrap();
+
+    let loc = format!(
+      "{},{},{},{},{},{}",
+      vm.mem[6049 + 37],
+      vm.mem[6049 + 38],
+      vm.mem[6049 + 39],
+      vm.mem[6049 + 40],
+      vm.mem[6049 + 41],
+      vm.mem[6049 + 42],
+    );
+
+    dbg!(vm.mem[6049 + 40]);
+    dbg!(6049 + 40);
+    // let mut s = String::new();
+
+    // for k in 0..12 {
+    //   let i = 1116 + k * 2;
+    //   let a = vm.mem[i];
+    //   let chars = format!("{a}");
+    //   dbg!(chars.clone());
+    //   let ch = char::from_u32(a as u32).unwrap();
+    //   // s.push(chars.chars().next().unwrap());
+    //   // s.push(' ');
+    //   s.push(ch);
+    // }
+    // dbg!(vm.mem[1139], vm.mem[1140], vm.mem[1141], vm.mem[1142]);
+
+    // vm.run().unwrap();
+    // nonzer
   }
 }

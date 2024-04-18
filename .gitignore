@@ -1,2 +1,5 @@
 /target
 .txt
+.json
+dbg_console.txt
+debug_log.txt
