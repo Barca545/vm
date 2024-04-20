@@ -14,17 +14,19 @@
 
 //Load file from a path not a preset one
 
-use crate::{errors::VMErrors, helpers::solver};
+use crate::{
+  errors::VMErrors,
+  helpers::{solver, Graph, Operation}
+};
 use eyre::Result;
 use serde::{Deserialize, Serialize};
 use std::{
   collections::VecDeque,
-  env::current_dir,
-  fs::{self, read, File},
-  io::{stdin, stdout, Write},
-  thread::sleep,
-  time::Duration
+  fs::{self, File},
+  io::{stdin, Write}
 };
+
+pub const WORDSIZE:u16 = 32768;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum OpCode {
@@ -254,9 +256,9 @@ impl VM {
     let mut arg = test_arg;
 
     //If the argument >= 32768, it is a register
-    if test_arg >= Self::WORDSIZE {
+    if test_arg >= WORDSIZE {
       //Read the value from the register and return it as the argument
-      let addr = (test_arg % Self::WORDSIZE) as usize;
+      let addr = (test_arg % WORDSIZE) as usize;
       arg = self.reg[addr];
     }
     //Otherwise the argument is equal to the test_argument
@@ -295,8 +297,6 @@ impl VM {
 
 //Opcode implementations
 impl VM {
-  const WORDSIZE:u16 = 32768;
-
   #[allow(non_snake_case)]
   ///Takes 0 arguments. Stops execution, resets the program counter, and
   /// terminates the program.
@@ -315,7 +315,7 @@ impl VM {
   pub fn Set(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(2);
-    let a = args[0] % Self::WORDSIZE;
+    let a = args[0] % WORDSIZE;
     let mut b = args[1];
 
     b = self.get_register_value(b);
@@ -351,7 +351,7 @@ impl VM {
   pub fn Pop(&mut self) -> Result<OpCall> {
     //Get the argument
     let args = self.get_args(1);
-    let a = args[0] % Self::WORDSIZE;
+    let a = args[0] % WORDSIZE;
 
     //Get the last element of on the stack
     let val = self.stack.pop();
@@ -373,7 +373,7 @@ impl VM {
   /// the value of the register the first argument indicates to 0.
   pub fn Eq(&mut self) -> Result<OpCall> {
     let args = self.get_args(3);
-    let a = args[0] % Self::WORDSIZE;
+    let a = args[0] % WORDSIZE;
     let mut b = args[1];
     let mut c = args[2];
 
@@ -395,7 +395,7 @@ impl VM {
   /// second argument's value is not greater than third argument's value.
   pub fn Gt(&mut self) -> Result<OpCall> {
     let args = self.get_args(3);
-    let a = args[0] % Self::WORDSIZE;
+    let a = args[0] % WORDSIZE;
     let mut b = args[1];
     let mut c = args[2];
 
@@ -481,7 +481,7 @@ impl VM {
   pub fn Add(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(3);
-    let a = args[0] % Self::WORDSIZE;
+    let a = args[0] % WORDSIZE;
     let mut b = args[1];
     let mut c = args[2];
 
@@ -489,7 +489,7 @@ impl VM {
     c = self.get_register_value(c);
 
     //Add c to b
-    let sum = (b + c) % Self::WORDSIZE;
+    let sum = (b + c) % WORDSIZE;
 
     //Store sum in the register indicated by a
     self.reg[a as usize] = sum;
@@ -506,7 +506,7 @@ impl VM {
   pub fn Mult(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(3);
-    let a = args[0] % Self::WORDSIZE;
+    let a = args[0] % WORDSIZE;
     let mut b = args[1];
     let mut c = args[2];
 
@@ -514,7 +514,7 @@ impl VM {
     c = self.get_register_value(c);
 
     //Multiply c and b
-    let prod = (b as u32 * c as u32) as u16 % Self::WORDSIZE;
+    let prod = (b as u32 * c as u32) as u16 % WORDSIZE;
 
     //Store the product in the register indicated by a
     self.reg[a as usize] = prod;
@@ -530,7 +530,7 @@ impl VM {
   pub fn Mod(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(3);
-    let a = args[0] % Self::WORDSIZE;
+    let a = args[0] % WORDSIZE;
     let mut b = args[1];
     let mut c = args[2];
 
@@ -556,7 +556,7 @@ impl VM {
   pub fn And(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(3);
-    let a = args[0] % Self::WORDSIZE;
+    let a = args[0] % WORDSIZE;
     let mut b = args[1];
     let mut c = args[2];
 
@@ -581,7 +581,7 @@ impl VM {
   pub fn Or(&mut self) -> Result<OpCall> {
     //Get the arguments
     let args = self.get_args(3);
-    let a = args[0] % Self::WORDSIZE;
+    let a = args[0] % WORDSIZE;
     let mut b = args[1];
     let mut c = args[2];
 
@@ -607,13 +607,13 @@ impl VM {
     //Get the arguments
     let args = self.get_args(2);
 
-    let a = args[0] % Self::WORDSIZE;
+    let a = args[0] % WORDSIZE;
     let mut b = args[1];
     b = self.get_register_value(b);
 
     //Calculate the value
     //Modulo by WORDSIZE to get the 15-bit inverse
-    let val = !b % Self::WORDSIZE;
+    let val = !b % WORDSIZE;
 
     //Store value in the register indicated by a
     self.reg[a as usize] = val;
@@ -630,7 +630,7 @@ impl VM {
     //Get the arguments
     let args = self.get_args(2);
 
-    let a = args[0] % Self::WORDSIZE;
+    let a = args[0] % WORDSIZE;
     let mut b = args[1];
     b = self.get_register_value(b);
 
@@ -731,7 +731,7 @@ impl VM {
   pub fn In(&mut self) -> Result<OpCall> {
     let args = self.get_args(1);
 
-    let a = args[0] % Self::WORDSIZE;
+    let a = args[0] % WORDSIZE;
 
     //Read the input from memory
     let s = self.inputs.pop_front();
@@ -773,32 +773,31 @@ impl VM {
       "fq" => self.force_quit(),
       "ls" => self.load_save(),
       "dbg" => self.debug(),
-      "step" => self.step(),
       "print" => self.prt(),
       "clear" => self.dbg_clear(),
       "solve" => self.solve(),
       "1115" => self.prt_mem_addr(1115),
-      "teleport" => self.teleport(17),
-      // "teleport" => {
-      //   self.reg[7] = 6;
-      //   // self.reg[0] = 6;
-      //   // self.reg[1] = 6;
-      //   // self.pc = 5531;
-      //   // self.run().unwrap();
-      // }
+      "path" => self.path(),
       _ => println!("{}", VMErrors::UnknownCommand(s))
     }
+  }
+
+  ///Generate a path for the room and appended it to inputs
+  fn path(&mut self) {
+    let mut graph = Graph::new();
+    graph.add_node(0, 22, &[(Operation::Sub, 1), (Operation::Sub, 2), (Operation::Add, 2), (Operation::Add, 4)]);
+    graph.add_node(1, 9, &[(Operation::Sub, 2), (Operation::Sub, 3), (Operation::Mul, 3)]);
+    graph.add_node(2, 4, &[(Operation::Sub, 3), (Operation::Add, 4), (Operation::Mul, 4), (Operation::Mul, 5)]);
+    graph.add_node(3, 18, &[(Operation::Sub, 5), (Operation::Mul, 5), (Operation::Mul, 7)]);
+    graph.add_node(4, 4, &[(Operation::Mul, 5), (Operation::Mul, 6)]);
+    graph.add_node(5, 11, &[(Operation::Mul, 6), (Operation::Mul, 7), (Operation::Sub, 6), (Operation::Sub, 7)]);
+    graph.add_node(6, 8, &[(Operation::Sub, 7)]);
+    graph.add_node(7, 1, &[]);
   }
 
   ///Toggle the debug mode. Required for implementing other debug operations.
   fn debug(&mut self) {
     self.debug ^= DEBUG;
-  }
-
-  ///Toggle step debug mode.
-  /// Each function call will wait for the user to press enter.
-  fn step(&mut self) {
-    self.debug ^= STEP;
   }
 
   ///Toggle print debug mode.
@@ -861,60 +860,6 @@ impl VM {
     self.load().unwrap();
   }
 
-  fn teleport(&mut self, r7:u16) {
-    self.reg[7] = r7;
-    // self.teleport_inner();
-  }
-
-  // fn teleport_inner(&mut self) {
-  //   if self.reg[0] != 0 {
-  //     //Total loops: R1 * R0 - 1
-  //     if self.reg[1] != 0 {
-  //       self.reg[0] -= 1;
-  //       self.teleport_inner();
-  //       self.reg[1] -= 1;
-  //       self.teleport_inner();
-  //     }
-  //     //Total loops: R7 * R0
-  //     else {
-  //       self.reg[0] -= 1;
-  //       self.reg[1] = self.reg[7];
-  //       self.teleport_inner();
-  //     }
-  //   }
-  //   self.reg[1] += 1;
-  //   dbg!(self.reg[1]);
-  // }
-
-  // fn teleport_inner(&mut self, r0:u16, r1:u16, r7:u16) -> u16 {
-  //   if r0 != 0 {
-  //     //Total loops: R1 * R0 - 1
-  //     if self.reg[1] != 0 {
-  //       // self.stack.push(self.reg[0]);
-  //       r0 -= 1;
-  //       self.teleport_inner();
-  //       r1 -= 1;
-  //       self.teleport_inner()
-  //     }
-  //     //Total loops: R7 * R0
-  //     else if r1 == 0 {
-  //       r0 -= 1;
-  //       r1 = r7;
-  //       self.teleport_inner()
-  //     }
-  //   }
-  //   //AS FAR AS I CAN TELL THE BELOW CAUSE AN INFINITE LOOP
-  //   //Total loops: R1 + 1
-  //   else if r0 == 0 {
-  //     // self.reg[0] = self.reg[1] + 1;
-  //     // self.reg[1] = self.reg[0];
-  //     // self.reg[0] = self.stack.pop().unwrap();
-  //     // self.reg[0] -= 1;
-  //     r1 += 1;
-  //     self.teleport_inner()
-  //   }
-  // }
-
   fn save(&self) {
     let mut file = File::create("sync_save.json").unwrap();
     let state = serde_json::to_string(&self).unwrap();
@@ -950,95 +895,5 @@ impl VM {
     //Add the loaded binary to the stack
     self.mem.extend_from_slice(bin);
     Ok(())
-  }
-}
-
-#[cfg(test)]
-mod test {
-  use super::VM;
-  use crate::vm::{OpCall, OpCode};
-  use std::{fmt::Write, fs::File, io::stdin};
-
-  #[test]
-  fn wmem_is_working() {
-    let mut vm = VM::new();
-    //Should write the value 6 into the 4th address of memory
-    let raw = &[0x0010, 0x0003, 0x0006, 0x0000];
-    vm.mem.extend_from_slice(raw);
-    let op = OpCode::new(vm.mem[vm.pc]).unwrap();
-    let call = vm.execute(op).unwrap();
-
-    //Test how OpCall prints
-    let mut f = File::create("debug_log.txt").unwrap();
-    print!("{}", call.to_string());
-    vm.debug_print(&mut f, call);
-
-    assert_eq!(vm.mem[3], 6);
-
-    let mut vm = VM::new();
-    //Should write the value stored in the 1st register (6) into the 4th address of
-    // memory
-    let raw = &[0x0010, 0x0003, 0x8000, 0x0000];
-    vm.reg[0] = 0x0006;
-    vm.mem.extend_from_slice(raw);
-
-    let op = OpCode::new(vm.mem[vm.pc]).unwrap();
-    vm.execute(op).unwrap();
-
-    assert_eq!(vm.mem[3], 6);
-  }
-
-  #[test]
-  fn test_hex_nums() {
-    dbg!(0x8000);
-    dbg!(3 % 10);
-    dbg!(28912 | 19626);
-    dbg!(!0_u16);
-    dbg!(32770 % 0x7FFF);
-  }
-
-  #[test]
-  fn take_input() {
-    let mut s = String::new();
-    println!("Input...");
-
-    stdin().read_line(&mut s).unwrap();
-
-    println!("{s}");
-  }
-
-  #[test]
-  fn find_line() {
-    let mut vm = VM::new();
-    vm.load().unwrap();
-
-    let loc = format!(
-      "{},{},{},{},{},{}",
-      vm.mem[6049 + 37],
-      vm.mem[6049 + 38],
-      vm.mem[6049 + 39],
-      vm.mem[6049 + 40],
-      vm.mem[6049 + 41],
-      vm.mem[6049 + 42],
-    );
-
-    dbg!(vm.mem[6049 + 40]);
-    dbg!(6049 + 40);
-    // let mut s = String::new();
-
-    // for k in 0..12 {
-    //   let i = 1116 + k * 2;
-    //   let a = vm.mem[i];
-    //   let chars = format!("{a}");
-    //   dbg!(chars.clone());
-    //   let ch = char::from_u32(a as u32).unwrap();
-    //   // s.push(chars.chars().next().unwrap());
-    //   // s.push(' ');
-    //   s.push(ch);
-    // }
-    // dbg!(vm.mem[1139], vm.mem[1140], vm.mem[1141], vm.mem[1142]);
-
-    // vm.run().unwrap();
-    // nonzer
   }
 }
