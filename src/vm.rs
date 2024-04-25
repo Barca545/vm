@@ -1,22 +1,9 @@
-//VM needs
-// == architecture ==
-// - three storage regions
-//   - memory with 15-bit address space storing 16-bit values
-//   - eight reg
-//   - an unbounded stack which holds individual 16-bit values
-// - all numbers are unsigned integers 0..32767 (15-bit)
-// - all math is modulo 32768; 32758 + 15 => 5
-
-// 15-bit address space means each memory address is two bytes with the first
-// byte equal to 0 each value starts on a memory adress divisible by 2
-
-//I need some error that flags if the value taken in is an error
-
-//Load file from a path not a preset one
-
 use crate::{
   errors::VMErrors,
-  helpers::{solver, Graph, Operation}
+  helpers::{
+    solver, Graph,
+    Operation::{Add, Mul, Sub}
+  }
 };
 use eyre::Result;
 use serde::{Deserialize, Serialize};
@@ -164,7 +151,6 @@ pub struct VM {
 
 //Debug Bitflags
 const DEBUG:u8 = 1 << 7;
-const STEP:u8 = 1 << 6;
 const PRINT:u8 = 1 << 5;
 
 impl VM {
@@ -784,15 +770,19 @@ impl VM {
 
   ///Generate a path for the room and appended it to inputs
   fn path(&mut self) {
-    let mut graph = Graph::new();
-    graph.add_node(0, 22, &[(Operation::Sub, 1), (Operation::Sub, 2), (Operation::Add, 2), (Operation::Add, 4)]);
-    graph.add_node(1, 9, &[(Operation::Sub, 2), (Operation::Sub, 3), (Operation::Mul, 3)]);
-    graph.add_node(2, 4, &[(Operation::Sub, 3), (Operation::Add, 4), (Operation::Mul, 4), (Operation::Mul, 5)]);
-    graph.add_node(3, 18, &[(Operation::Sub, 5), (Operation::Mul, 5), (Operation::Mul, 7)]);
-    graph.add_node(4, 4, &[(Operation::Mul, 5), (Operation::Mul, 6)]);
-    graph.add_node(5, 11, &[(Operation::Mul, 6), (Operation::Mul, 7), (Operation::Sub, 6), (Operation::Sub, 7)]);
-    graph.add_node(6, 8, &[(Operation::Sub, 7)]);
-    graph.add_node(7, 1, &[]);
+    //Create the graph
+    let mut graph = Graph::new(8);
+    graph.add_node(0, 8, vec![(Sub, 1), (Sub, 3), (Mul, 3), (Mul, 4), (Mul, 2)]);
+    graph.add_node(1, 1, vec![(Mul, 5), (Mul, 3), (Sub, 0), (Sub, 3)]);
+    graph.add_node(2, 4, vec![(Mul, 0), (Mul, 3), (Mul, 4), (Add, 4)]);
+    graph.add_node(3, 11, vec![(Sub, 0), (Sub, 1), (Mul, 0), (Mul, 1), (Mul, 4), (Mul, 5), (Sub, 7), (Mul, 2), (Sub, 4), (Sub, 5)]);
+    graph.add_node(4, 4, vec![(Mul, 2), (Mul, 0), (Mul, 3), (Add, 2), (Sub, 3), (Sub, 5), (Sub, 7)]);
+    graph.add_node(5, 18, vec![(Sub, 7), (Sub, 4), (Sub, 3), (Mul, 3), (Mul, 1), (Mul, 7)]);
+    graph.add_node(6, 22, vec![(Sub, 7), (Sub, 4), (Add, 4), (Add, 2)]);
+    graph.add_node(7, 9, vec![(Sub, 4), (Sub, 3), (Sub, 5), (Mul, 5)]);
+
+    //Calculate the path
+    graph.get_shortest_path((6, 22), (1, 30));
   }
 
   ///Toggle the debug mode. Required for implementing other debug operations.
